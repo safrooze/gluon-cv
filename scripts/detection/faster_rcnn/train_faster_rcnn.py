@@ -20,6 +20,17 @@ from gluoncv.data.transforms.presets.rcnn import FasterRCNNDefaultValTransform
 from gluoncv.utils.metrics.voc_detection import VOC07MApMetric
 from gluoncv.utils.metrics.coco_detection import COCODetectionMetric
 from gluoncv.utils.metrics.accuracy import Accuracy
+from gluoncv.utils import download
+
+
+class CustomMApMetric(VOC07MApMetric):
+    def __init__(self, *args, **kwargs):
+        super(CustomMApMetric, self).__init__(*args, **kwargs)
+
+    def update(self, pred_bboxes, pred_labels, pred_scores, gt_bboxes, gt_labels, gt_difficults=None):
+        if gt_difficults is None:
+            gt_difficults = [np.zeros(gt_bbox.shape[0]) for gt_bbox in gt_bboxes]
+        super(CustomMApMetric, self).update(pred_bboxes, pred_labels, pred_scores, gt_bboxes, gt_labels, gt_difficults)
 
 
 def parse_args():
@@ -27,7 +38,9 @@ def parse_args():
     parser.add_argument('--network', type=str, default='resnet50_v1b',
                         help="Base network name which serves as feature extraction base.")
     parser.add_argument('--dataset', type=str, default='voc',
-                        help='Training dataset. Now support voc and coco.')
+                        help='Training dataset. Now support voc, coco, and custom')
+    parser.add_argument('--class-names', nargs='+',
+                        help='class names for custom dataset.')
     parser.add_argument('--num-workers', '-j', dest='num_workers', type=int,
                         default=4, help='Number of data workers, you can use larger '
                         'number to accelerate data loading, if you CPU and GPUs are powerful.')
@@ -70,7 +83,7 @@ def parse_args():
     parser.add_argument('--no-mixup-epochs', type=int, default=20,
                         help='Disable mixup training if enabled in the last N epochs.')
     args = parser.parse_args()
-    if args.dataset == 'voc':
+    if args.dataset == 'voc' or args.dataset == 'custom':
         args.epochs = int(args.epochs) if args.epochs else 20
         args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '14,20'
         args.lr = float(args.lr) if args.lr else 0.001
@@ -182,6 +195,20 @@ def get_dataset(dataset, args):
         train_dataset = gdata.COCODetection(splits='instances_train2017', use_crowd=False)
         val_dataset = gdata.COCODetection(splits='instances_val2017', skip_empty=False)
         val_metric = COCODetectionMetric(val_dataset, args.save_prefix + '_eval', cleanup=True)
+    elif dataset.lower() == 'custom':
+        train_url = 'https://apache-mxnet.s3-accelerate.amazonaws.com/gluon/dataset/pikachu/train.rec'
+        train_idx_url = 'https://apache-mxnet.s3-accelerate.amazonaws.com/gluon/dataset/pikachu/train.idx'
+        download(train_url, path='pikachu_train.rec', overwrite=False)
+        download(train_idx_url, path='pikachu_train.idx', overwrite=False)
+
+        val_url = 'https://apache-mxnet.s3-accelerate.amazonaws.com/gluon/dataset/pikachu/val.rec'
+        val_idx_url = 'https://apache-mxnet.s3-accelerate.amazonaws.com/gluon/dataset/pikachu/val.idx'
+        download(val_url, path='pikachu_val.rec', overwrite=False)
+        download(val_idx_url, path='pikachu_val.idx', overwrite=False)
+
+        train_dataset = gcv.data.RecordFileDetection('pikachu_train.rec')
+        val_dataset = gcv.data.RecordFileDetection('pikachu_val.rec')
+        val_metric = CustomMApMetric(iou_thresh=0.5, class_names=args.class_names)
     else:
         raise NotImplementedError('Dataset: {} not implemented.'.format(dataset))
     if args.mixup:
@@ -413,7 +440,8 @@ if __name__ == '__main__':
     # network
     net_name = '_'.join(('faster_rcnn', args.network, args.dataset))
     args.save_prefix += net_name
-    net = get_model(net_name, pretrained_base=True)
+    class_arg = {'classes': args.class_names} if args.dataset == 'custom' else {}
+    net = get_model(net_name, pretrained_base=True, **class_arg)
     if args.resume.strip():
         net.load_parameters(args.resume.strip())
     else:
